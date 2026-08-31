@@ -1,0 +1,58 @@
+# `docker compose up` starts local infrastructure for fast agent iteration.
+# `docker compose --profile full up --build` also runs the LiveKit worker.
+name: insurance-voice-agent
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: meridian
+      POSTGRES_PASSWORD: meridian
+      POSTGRES_DB: meridian_demo
+    ports:
+      - "${PG_PORT:-55433}:5432"       # non-default host port: avoids clashing
+    volumes:                           # with other local postgres instances
+      - pgdata:/var/lib/postgresql/data
+      # *.sql in this dir run in filename order on first boot only
+      - ./db/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+      - ./db/seed.sql:/docker-entrypoint-initdb.d/02-seed.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U meridian -d meridian_demo"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  tools-api:
+    build: ./tools-api
+    environment:
+      DATABASE_URL: postgresql://meridian:meridian@postgres:5432/meridian_demo
+    ports:
+      - "${TOOLS_PORT:-18091}:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/health')"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  agent:
+    profiles: ["full"]
+    build: .
+    env_file: .env.local
+    environment:
+      TOOLS_API_URL: http://tools-api:8080
+      GOOGLE_APPLICATION_CREDENTIALS: /etc/vertex/creds.json
+    volumes:
+      # Supplied by the harness platform, not by the repository. /dev/null keeps
+      # infrastructure discovery possible when voice credentials are absent.
+      - ${VERTEX_CREDENTIALS:-/dev/null}:/etc/vertex/creds.json:ro
+    depends_on:
+      tools-api:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  pgdata:
